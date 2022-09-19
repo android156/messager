@@ -378,7 +378,7 @@ def database_load(sock, database, username):
 
 def main():
     # Сообщаем о запуске
-    print('Консольный месседжер. Клиентский модуль.')
+    print('Консольный мессенджер. Клиентский модуль.')
 
     # Загружаем параметры коммандной строки
     server_address, server_port, client_name = arg_parser()
@@ -448,6 +448,7 @@ def main():
             if module_receiver.is_alive() and module_sender.is_alive():
                 continue
             break
+    x = input()
 
 
 if __name__ == '__main__':

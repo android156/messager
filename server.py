@@ -241,7 +241,7 @@ def main():
     config.read(f"{dir_path}/{'server.ini'}")
 
     # Загрузка параметров командной строки, если нет параметров, то задаём
-    # значения по умоланию.
+    # значения по умолчанию.
     listen_address, listen_port = arg_parser(
         config['SETTINGS']['Default_port'], config['SETTINGS']['Listen_Address'])
 
