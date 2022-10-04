@@ -1,260 +1,104 @@
-import socket
 import sys
+import os
 import argparse
-import json
 import logging
-import threading
-
-import select
-import time
+import configparser
 import logs.config_server_log
-from errors import IncorrectDataRecivedError
+
 from common.variables import *
 from common.utils import *
-from decos import log
-from metaclasses import ServerMaker
-from server_database import ServerStorage
+from common.decos import log
+from server.core import MessageProcessor
+from server.database import ServerStorage
+from server.main_window import MainWindow
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtCore import Qt
 
 # Инициализация логирования сервера.
 logger = logging.getLogger('server_dist')
 
 
-# Парсер аргументов командной строки.
 @log
-def arg_parser():
+def arg_parser(default_port, default_address):
+    """Парсер аргументов коммандной строки."""
+    logger.debug(
+        f'Инициализация парсера аргументов коммандной строки: {sys.argv}')
     parser = argparse.ArgumentParser()
-    parser.add_argument('-p', default=DEFAULT_PORT, type=int, nargs='?')
-    parser.add_argument('-a', default='', nargs='?')
+    parser.add_argument('-p', default=default_port, type=int, nargs='?')
+    parser.add_argument('-a', default=default_address, nargs='?')
+    parser.add_argument('--no_gui', action='store_true')
     namespace = parser.parse_args(sys.argv[1:])
     listen_address = namespace.a
     listen_port = namespace.p
-    return listen_address, listen_port
+    gui_flag = namespace.no_gui
+    logger.debug('Аргументы успешно загружены.')
+    return listen_address, listen_port, gui_flag
 
 
-# Дескриптор порта
-
-class PortDescriptor:
-
-    def __get__(self, instance, owner):
-        return instance.__dict__[self.my_attr]
-
-    def __set__(self, instance, value):
-        if not 1023 < value < 65536:
-            logger.critical(
-                f'Попытка запуска сервера с указанием неподходящего порта {value}. '
-                f'Допустимы адреса с 1024 до 65535.')
-            raise ValueError(f'Попытка запуска клиента с неподходящим номером порта: {value}. '
-                             f'Допустимы адреса с 1024 до 65535. Сервер отключается.')
-        instance.__dict__[self.my_attr] = value
-
-    def __set_name__(self, owner, my_attr):
-        self.my_attr = my_attr
-
-
-# Основной класс сервера
-class Server(threading.Thread, metaclass=ServerMaker):
-    port = PortDescriptor()
-
-    def __init__(self, listen_address, listen_port, database):
-        # Параметры подключения
-        self.addr = listen_address
-        self.port = listen_port
-
-        # База данных сервера
-        self.database = database
-
-        # Список подключённых клиентов.
-        self.clients = []
-
-        # Список сообщений на отправку.
-        self.messages = []
-
-        # Словарь содержащий сопоставленные имена и соответствующие им сокеты.
-        self.names = dict()
-
-        super().__init__()
-
-    def init_socket(self):
-        logger.info(
-            f'Запущен сервер, порт для подключений: {self.port}, '
-            f'адрес с которого принимаются подключения: {self.addr}. '
-            f'Если адрес не указан, принимаются соединения с любых адресов.')
-        # Готовим сокет
-        transport = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        transport.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        transport.bind((self.addr, self.port))
-        transport.settimeout(0.5)
-
-        # Начинаем слушать сокет.
-        self.sock = transport
-        self.sock.listen()
-
-    def run(self):
-        # Инициализация Сокета
-        self.init_socket()
-
-        # Основной цикл программы сервера
-        while True:
-            # Ждём подключения, если таймаут вышел, ловим исключение.
-            try:
-                client, client_address = self.sock.accept()
-            except OSError:
-                pass
-            else:
-                logger.info(f'Установлено соедение с ПК {client_address}')
-                self.clients.append(client)
-
-            recv_data_lst = []
-            send_data_lst = []
-            err_lst = []
-            # Проверяем на наличие ждущих клиентов
-            try:
-                if self.clients:
-                    recv_data_lst, send_data_lst, err_lst = select.select(self.clients, self.clients, [], 0)
-            except OSError:
-                pass
-
-            # принимаем сообщения и если ошибка, исключаем клиента.
-            if recv_data_lst:
-                for client_with_message in recv_data_lst:
-                    try:
-                        self.process_client_message(get_message(client_with_message), client_with_message)
-                    except:
-                        logger.info(f'Клиент {client_with_message.getpeername()} отключился от сервера.')
-                        self.clients.remove(client_with_message)
-
-            # Если есть сообщения, обрабатываем каждое.
-            for message in self.messages:
-                try:
-                    self.process_message(message, send_data_lst)
-                except Exception as e:
-                    logger.info(f'Связь с клиентом с именем '
-                                f'{message[DESTINATION]} была потеряна, '
-                                f' ошибка {e}')
-                    self.clients.remove(self.names[message[DESTINATION]])
-                    del self.names[message[DESTINATION]]
-            self.messages.clear()
-
-    # Функция адресной отправки сообщения определённому клиенту.
-    # Принимает словарь сообщение, список зарегистрированных
-    # пользователей и слушающие сокеты. Ничего не возвращает.
-    def process_message(self, message, listen_socks):
-        if message[DESTINATION] in self.names and \
-                self.names[message[DESTINATION]] in listen_socks:
-            send_message(self.names[message[DESTINATION]], message)
-            logger.info(f'Отправлено сообщение пользователю {message[DESTINATION]} '
-                        f'от пользователя {message[SENDER]}.')
-        elif message[DESTINATION] in self.names \
-                and self.names[message[DESTINATION]] not in listen_socks:
-            raise ConnectionError
-        else:
-            logger.error(
-                f'Пользователь {message[DESTINATION]} не зарегистрирован '
-                f'на сервере, отправка сообщения невозможна.')
-
-    # Обработчик сообщений от клиентов, принимает словарь - сообщение от клиента,
-    # проверяет корректность, отправляет словарь-ответ в случае необходимости.
-    def process_client_message(self, message, client):
-        logger.debug(f'Разбор сообщения от клиента : {message}')
-        # Если это сообщение о присутствии, принимаем и отвечаем
-        if ACTION in message and message[ACTION] == PRESENCE \
-                and TIME in message and USER in message:
-            # Если такой пользователь ещё не зарегистрирован, регистрируем,
-            # иначе отправляем ответ и завершаем соединение.
-            if message[USER][ACCOUNT_NAME] not in self.names.keys():
-                self.names[message[USER][ACCOUNT_NAME]] = client
-                client_ip, client_port = client.getpeername()
-                self.database.user_login(message[USER][ACCOUNT_NAME], client_ip, client_port)
-                send_message(client, RESPONSE_200)
-            else:
-                response = RESPONSE_400
-                response[ERROR] = 'Имя пользователя уже занято.'
-                send_message(client, response)
-                self.clients.remove(client)
-                client.close()
-            return
-        # Если это сообщение, то добавляем его в очередь сообщений. Ответ не требуется.
-        elif ACTION in message \
-                and message[ACTION] == MESSAGE \
-                and DESTINATION in message \
-                and TIME in message \
-                and SENDER in message \
-                and MESSAGE_TEXT in message:
-            self.messages.append(message)
-            return
-        # Если клиент выходит
-        elif ACTION in message \
-                and message[ACTION] == EXIT \
-                and ACCOUNT_NAME in message:
-            self.database.user_logout(message[ACCOUNT_NAME])
-            self.clients.remove(self.names[ACCOUNT_NAME])
-            self.names[ACCOUNT_NAME].close()
-            del self.names[ACCOUNT_NAME]
-            return
-        # Иначе отдаём Bad request
-        else:
-            response = RESPONSE_400
-            response[ERROR] = 'Запрос некорректен.'
-            send_message(client, response)
-            return
-
-def print_help():
-    print('Поддерживаемые комманды:')
-    print('users - список известных пользователей')
-    print('connected - список подключённых пользователей')
-    print('loghist - история входов пользователя')
-    print('exit - завершение работы сервера.')
-    print('help - вывод справки по поддерживаемым командам')
+@log
+def config_load():
+    """Парсер конфигурационного ini файла."""
+    config = configparser.ConfigParser()
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    config.read(f"{dir_path}/{'server_dist+++.ini'}")
+    # Если конфиг файл загружен правильно, запускаемся, иначе конфиг по
+    # умолчанию.
+    if 'SETTINGS' in config:
+        return config
+    else:
+        config.add_section('SETTINGS')
+        config.set('SETTINGS', 'Default_port', str(DEFAULT_PORT))
+        config.set('SETTINGS', 'Listen_Address', '')
+        config.set('SETTINGS', 'Database_path', '')
+        config.set('SETTINGS', 'Database_file', 'server_database.db3')
+        return config
 
 
+@log
 def main():
-    # Загрузка параметров командной строки, если нет параметров,
-    # то задаём значения по умолчанию.
-    listen_address, listen_port = arg_parser()
+    '''Основная функция'''
+    # Загрузка файла конфигурации сервера
+    config = config_load()
 
-    database = ServerStorage()
+    # Загрузка параметров командной строки, если нет параметров, то задаём
+    # значения по умоланию.
+    listen_address, listen_port, gui_flag = arg_parser(
+        config['SETTINGS']['Default_port'], config['SETTINGS']['Listen_Address'])
 
-    # Создание экземпляра класса - сервера.
-    server = Server(listen_address, listen_port, database)
+    # Инициализация базы данных
+    database = ServerStorage(
+        os.path.join(
+            config['SETTINGS']['Database_path'],
+            config['SETTINGS']['Database_file']))
+
+    # Создание экземпляра класса - сервера и его запуск:
+    server = MessageProcessor(listen_address, listen_port, database)
     server.daemon = True
     server.start()
 
-    print_help()
+    # Если  указан параметр без GUI то запускаем простенький обработчик
+    # консольного ввода
+    if gui_flag:
+        while True:
+            command = input('Введите exit для завершения работы сервера.')
+            if command == 'exit':
+                # Если выход, то завершаем основной цикл сервера.
+                server.running = False
+                server.join()
+                break
 
-    while True:
-        command = input('Введите команду: ')
-        if command == 'help':
-            print_help()
-        elif command == 'exit':
-            break
-        elif command == 'users':
-            all_users = sorted(database.users_list())
-            if all_users:
-                for user in all_users:
-                    print(f'Пользователь {user[0]}, последний вход: {user[1]}')
-            else:
-                print('No data')
+    # Если не указан запуск без GUI, то запускаем GUI:
+    else:
+        # Создаём графическое окружение для сервера:
+        server_app = QApplication(sys.argv)
+        server_app.setAttribute(Qt.AA_DisableWindowContextHelpButton)
+        main_window = MainWindow(database, server, config)
 
-        elif command == 'connected':
-            active_users = sorted(database.active_users_list())
-            if active_users:
-                for user in active_users:
-                    print(f'Пользователь {user[0]}, подключен: {user[1]}:{user[2]}, '
-                          f'время установки соединения: {user[3]}')
-            else:
-                print('No data')
-        elif command == 'loghist':
-            name = input('Введите имя пользователя для просмотра истории. '
-                         'Для вывода всей истории, просто нажмите Enter: ')
-            history = sorted(database.login_history(name))
-            if history:
-                for user in sorted(database.login_history(name)):
-                    print(f'Пользователь: {user[0]} время входа: {user[1]}. '
-                          f'Вход с: {user[2]}:{user[3]}')
-            else:
-                print('No data')
-        else:
-            print('Команда не распознана.')
+        # Запускаем GUI
+        server_app.exec_()
+
+        # По закрытию окон останавливаем обработчик сообщений
+        server.running = False
 
 
 if __name__ == '__main__':
