@@ -20,7 +20,7 @@ logger = logging.getLogger('server_dist')
 
 @log
 def arg_parser(default_port, default_address):
-    """Парсер аргументов коммандной строки."""
+    """Парсер аргументов командной строки."""
     logger.debug(
         f'Инициализация парсера аргументов коммандной строки: {sys.argv}')
     parser = argparse.ArgumentParser()
@@ -56,7 +56,7 @@ def config_load():
 
 @log
 def main():
-    '''Основная функция'''
+    """Основная функция"""
     # Загрузка файла конфигурации сервера
     config = config_load()
 
@@ -76,7 +76,7 @@ def main():
     server.daemon = True
     server.start()
 
-    # Если  указан параметр без GUI то запускаем простенький обработчик
+    # Если указан параметр без GUI, то запускаем простенький обработчик
     # консольного ввода
     if gui_flag:
         while True:
